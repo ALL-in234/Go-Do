@@ -4,6 +4,8 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
   <title>每日任務 ✦</title>
+  <!-- Dexie.js CDN -->
+  <script src="https://unpkg.com/dexie@4/dist/dexie.js"></script>
   <style>
     :root {
       --primary: #6366f1;
@@ -103,8 +105,6 @@
     }
     .delete-btn:hover { background: #fecaca; }
     .empty { text-align: center; color: var(--text-light); padding: 60px 20px; font-size: 1.1rem; }
-
-    /* 類別顏色 */
     .cat-work  { background: var(--work); }
     .cat-study { background: var(--study); }
     .cat-sport { background: var(--sport); }
@@ -135,13 +135,15 @@
 </div>
 
 <script>
-const STORAGE_KEY = 'daily-tasks-v2-2026';
-const STREAK_KEY = 'daily-streak-2026';
+// ==================== IndexedDB 設定 (使用 Dexie.js) ====================
+const db = new Dexie('DailyTasksDB');
 
-let tasks = [];
-let todayStr = '';
-let streak = 0;
+db.version(1).stores({
+  tasks: 'date, tasks',          // date 作為主鍵，每天一筆
+  streaks: 'date, value'         // 每天的 streak 值
+});
 
+// 類別名稱對應
 const categoryNames = {
   work:  "工作",
   study: "學習",
@@ -150,74 +152,59 @@ const categoryNames = {
   other: "其他"
 };
 
+// 全域變數
+let todayStr = '';
+let tasks = [];
+let streak = 0;
+
 // 取得今天 YYYY-MM-DD
 function getToday() {
   return new Date().toISOString().split('T')[0];
 }
 
-// 載入資料
-function loadData() {
-  todayStr = getToday();
-  document.getElementById('today').textContent = new Date().toLocaleDateString('zh-TW', {
-    weekday: 'long', year: 'numeric', month: 'long', day: 'numeric'
-  });
-
-  // 載入任務
-  const savedTasks = localStorage.getItem(STORAGE_KEY);
-  if (savedTasks) {
-    try {
-      const data = JSON.parse(savedTasks);
-      if (data.date === todayStr) {
-        tasks = data.tasks || [];
-      } else {
-        tasks = [];
-      }
-    } catch(e) { tasks = []; }
-  }
-
-  // 載入連續天數
-  const savedStreak = localStorage.getItem(STREAK_KEY);
-  if (savedStreak) {
-    try {
-      const s = JSON.parse(savedStreak);
-      if (s.date === getYesterday()) {
-        streak = s.value;
-      } else if (s.date === todayStr) {
-        streak = s.value;
-      } else {
-        streak = 0;
-      }
-    } catch(e) { streak = 0; }
-  }
-
-  updateStreakDisplay();
-  renderTasks();
-}
-
-// 取得昨天的日期字串
+// 取得昨天 YYYY-MM-DD
 function getYesterday() {
   const d = new Date();
   d.setDate(d.getDate() - 1);
   return d.toISOString().split('T')[0];
 }
 
-// 儲存當日任務
-function saveTasks() {
-  localStorage.setItem(STORAGE_KEY, JSON.stringify({
-    date: todayStr,
-    tasks: tasks
-  }));
-  checkStreak();
+// 載入資料
+async function loadData() {
+  todayStr = getToday();
+  document.getElementById('today').textContent = new Date().toLocaleDateString('zh-TW', {
+    weekday: 'long', year: 'numeric', month: 'long', day: 'numeric'
+  });
+
+  // 載入今天任務
+  const todayRecord = await db.tasks.get(todayStr);
+  tasks = todayRecord ? todayRecord.tasks : [];
+
+  // 載入 streak（優先今天，若無則看昨天）
+  let streakRecord = await db.streaks.get(todayStr);
+  if (!streakRecord) {
+    streakRecord = await db.streaks.get(getYesterday());
+    streak = streakRecord ? streakRecord.value : 0;
+  } else {
+    streak = streakRecord.value;
+  }
+
+  updateStreakDisplay();
+  renderTasks();
+}
+
+// 儲存今天任務
+async function saveTasks() {
+  await db.tasks.put({ date: todayStr, tasks });
+  await checkStreak();
 }
 
 // 儲存 streak
-function saveStreak() {
-  localStorage.setItem(STREAK_KEY, JSON.stringify({
-    date: todayStr,
-    value: streak
-  }));
+async function saveStreak() {
+  await db.streaks.put({ date: todayStr, value: streak });
 }
 
+// 更新 streak 顯示
 function updateStreakDisplay() {
   const el = document.getElementById('streak');
   const text = streak > 0 ? `連續達成 ${streak} 天 🔥` : '今天開始你的連續達成吧！';
@@ -225,43 +212,39 @@ function updateStreakDisplay() {
   el.style.color = streak >= 7 ? '#dc2626' : (streak >= 3 ? '#f59e0b' : '#64748b');
 }
 
-// 檢查是否全部完成 → 更新 streak
-function checkStreak() {
-  if (tasks.length === 0) return;
-
-  const allDone = tasks.every(t => t.done);
-  const yesterdayStr = getYesterday();
-
-  // 讀取昨天的 streak 資料（避免覆蓋）
-  let prevStreak = 0;
-  const saved = localStorage.getItem(STREAK_KEY);
-  if (saved) {
-    try {
-      const s = JSON.parse(saved);
-      if (s.date === yesterdayStr) {
-        prevStreak = s.value;
-      }
-    } catch(e){}
+// 檢查並更新 streak
+async function checkStreak() {
+  if (tasks.length === 0) {
+    streak = 0;
+    updateStreakDisplay();
+    await saveStreak();
+    return;
   }
 
-  if (allDone) {
-    // 今天全部完成
-    if (prevStreak > 0 && localStorage.getItem(STREAK_KEY)?.includes(yesterdayStr)) {
-      streak = prevStreak + 1;
-    } else {
-      streak = 1;
-    }
-  } else {
-    // 今天沒全部完成 → 重置為 0
+  const allDone = tasks.every(t => t.done);
+  if (!allDone) {
     streak = 0;
+    updateStreakDisplay();
+    await saveStreak();
+    return;
+  }
+
+  // 今天全部完成
+  const yesterdayStr = getYesterday();
+  const yesterdayStreak = await db.streaks.get(yesterdayStr);
+
+  if (yesterdayStreak && yesterdayStreak.value > 0) {
+    streak = yesterdayStreak.value + 1;
+  } else {
+    streak = 1;
   }
 
   updateStreakDisplay();
-  saveStreak();
+  await saveStreak();
 }
 
 // 新增任務
-function addTask() {
+async function addTask() {
   const input = document.getElementById('taskInput');
   const catSelect = document.getElementById('categorySelect');
   const text = input.value.trim();
@@ -275,29 +258,29 @@ function addTask() {
   });
 
   input.value = '';
-  saveTasks();
+  await saveTasks();
   renderTasks();
 }
 
 // 切換完成狀態
-function toggleTask(id) {
+async function toggleTask(id) {
   const task = tasks.find(t => t.id === id);
   if (task) {
     task.done = !task.done;
-    saveTasks();
+    await saveTasks();
     renderTasks();
   }
 }
 
 // 刪除任務
-function deleteTask(id) {
+async function deleteTask(id) {
   if (!confirm('確定刪除這項任務？')) return;
   tasks = tasks.filter(t => t.id !== id);
-  saveTasks();
+  await saveTasks();
   renderTasks();
 }
 
-// 渲染
+// 渲染任務列表
 function renderTasks() {
   const container = document.getElementById('taskList');
   container.innerHTML = '';
@@ -327,13 +310,16 @@ function renderTasks() {
   });
 }
 
-// Enter 送出
+// Enter 鍵新增
 document.getElementById('taskInput').addEventListener('keypress', e => {
   if (e.key === 'Enter') addTask();
 });
 
 // 啟動
-loadData();
+loadData().catch(err => {
+  console.error('資料庫載入失敗:', err);
+  alert('無法載入資料庫，請檢查瀏覽器是否支援 IndexedDB');
+});
 </script>
 </body>
 </html>
